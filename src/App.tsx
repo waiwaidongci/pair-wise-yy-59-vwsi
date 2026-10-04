@@ -13,6 +13,8 @@ import {
 import {
   AlertTriangle,
   ArrowLeft,
+  ArrowRight,
+  Ban,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -21,21 +23,27 @@ import {
   Eye,
   FileCheck2,
   FileText,
+  FileWarning,
+  Handshake,
   Highlighter,
   Layers3,
+  Lock,
   Menu,
   PanelLeftClose,
+  RotateCcw,
   ScanSearch,
+  ShieldAlert,
   ShieldCheck,
   Stamp,
   Tags,
-  UploadCloud
+  UploadCloud,
+  X
 } from 'lucide-react';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { Badge, Button, Card, Dialog, Tabs, X } from './components/ui';
-import { useDisclosureStore, type DisclosureRecord } from './store';
+import { Badge, Button, Card, Dialog, Tabs } from './components/ui';
+import { useDisclosureStore, isAuthorized, isGated, reviewerName, type DisclosureRecord, type Handover, type Redaction } from './store';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -53,7 +61,8 @@ function AppShell() {
     { to: '/', label: '文档集', icon: Layers3 },
     { to: '/review/$documentId', label: '去密审阅', icon: Highlighter },
     { to: '/quality', label: '发布质检', icon: ScanSearch },
-    { to: '/batches', label: '批次与标签', icon: Tags }
+    { to: '/batches', label: '批次与标签', icon: Tags },
+    { to: '/handover', label: '授权交接', icon: Handshake }
   ];
   return (
     <div className="app-shell">
@@ -88,6 +97,25 @@ function AppShell() {
         </aside>
         <main className="main-content"><Outlet /></main>
       </div>
+      <RejectionToast />
+    </div>
+  );
+}
+
+function RejectionToast() {
+  const rejection = useDisclosureStore((state) => state.rejection);
+  const dismissRejection = useDisclosureStore((state) => state.dismissRejection);
+  useEffect(() => {
+    if (!rejection) return;
+    const timer = window.setTimeout(dismissRejection, 6000);
+    return () => window.clearTimeout(timer);
+  }, [rejection, dismissRejection]);
+  if (!rejection) return null;
+  return (
+    <div className="rejection-toast" role="alert">
+      <Ban size={17} />
+      <span>{rejection}</span>
+      <button onClick={dismissRejection} aria-label="关闭"><X size={15} /></button>
     </div>
   );
 }
@@ -256,7 +284,7 @@ function PdfPage({ pageNumber, redacted = false, onDraw }: { pageNumber: number;
 function ReviewPage() {
   const { documentId } = useParams({ from: '/review/$documentId' });
   const navigate = useNavigate();
-  const { documents, activePage, redactionMode, activeRedactionId } = useDisclosureStore();
+  const { documents, reviewers, authorizations, handovers, currentOperatorId, activePage, redactionMode, activeRedactionId } = useDisclosureStore();
   const store = useDisclosureStore();
   const doc = documents.find((item) => item.id === documentId) ?? documents[0];
   const pageRegions = doc.redactions.filter((item) => item.page === activePage);
@@ -264,6 +292,8 @@ function ReviewPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reason, setReason] = useState('商业秘密');
   const [privilege, setPrivilege] = useState('合同保密');
+  const authorized = isAuthorized(authorizations, doc.id, currentOperatorId);
+  const gate = isGated(handovers, doc.id);
   return (
     <div className="page review-page">
       <header className="review-header">
@@ -275,9 +305,18 @@ function ReviewPage() {
         <div className="review-actions">
           <Button variant="outline" onClick={() => store.toggleRedactionMode()} className={redactionMode ? 'active-button' : ''}><Highlighter size={16} /> {redactionMode ? '取消绘制' : '绘制去密区'}</Button>
           <Button variant="outline" onClick={() => setDialogOpen(true)}><FileCheck2 size={16} /> 发布前校验</Button>
-          <Button><Check size={16} /> 提交质检</Button>
+          <Button onClick={store.submitForQuality}><Check size={16} /> 提交质检</Button>
         </div>
       </header>
+      {!authorized && (
+        <div className="inline-banner denied"><Ban size={15} /><span>您不是 {doc.id} 的授权复核人（当前负责人：{reviewerName(reviewers, doc.owner)}），绘制、确认、改密级与提交均会被直接拒绝。</span></div>
+      )}
+      {authorized && gate && (
+        <div className="inline-banner gate"><ShieldAlert size={15} /><span>发布门禁未放行：本文档存在未完成的授权交接 {gate.id}，交接完成前相应批次不得发布。</span></div>
+      )}
+      {doc.reviewInvalid && (
+        <div className="inline-banner invalid"><FileWarning size={15} /><span>原复核结论已失效：{doc.invalidReason ?? '密级或区域变更'}，须重新生成复核结论后再发布。</span></div>
+      )}
       <div className="review-layout">
         <aside className="page-thumbs">
           <div className="side-label">页级预览 <span>{doc.pages} 页</span></div>
@@ -315,12 +354,15 @@ function ReviewPage() {
           {active ? (
             <>
               <div className="inspector-title"><strong>{active.reason}</strong><Badge tone={active.status === 'confirmed' ? 'green' : 'amber'}>{active.status === 'confirmed' ? '已确认' : '草稿'}</Badge></div>
+              {active.status === 'confirmed'
+                ? <div className="signed-note"><Lock size={13} /><span>已签结论 · 只读保留（签署人：{reviewerName(reviewers, active.signedBy)}）</span></div>
+                : <div className="unsigned-note"><Highlighter size={13} /><span>未完成项：交接后随文档与区域重新分派给接手人</span></div>}
               <label>保密级别<select value={doc.classification} onChange={(event) => store.updateClassification(event.target.value as DisclosureRecord['classification'])}><option>内部</option><option>机密</option><option>严格机密</option></select></label>
               <label>去密原因<input value={active.reason} readOnly /></label>
               <label>特权标签<input value={active.privilege} readOnly /></label>
-              <label>责任人员<input value={doc.owner} readOnly /></label>
+              <label>责任人员<input value={reviewerName(reviewers, doc.owner)} readOnly /></label>
               <div className="coordinate-grid"><div><span>X</span><b>{Math.round(active.x * 100)}%</b></div><div><span>Y</span><b>{Math.round(active.y * 100)}%</b></div><div><span>宽</span><b>{Math.round(active.width * 100)}%</b></div><div><span>高</span><b>{Math.round(active.height * 100)}%</b></div></div>
-              <Button onClick={() => store.confirmRedaction(active.id)} disabled={active.status === 'confirmed'}><Check size={15} /> 确认此区域</Button>
+              <Button onClick={() => store.confirmRedaction(active.id)} disabled={active.status === 'confirmed' || !authorized}><Check size={15} /> 确认此区域</Button>
               <Button variant="outline"><Copy size={15} /> 批量复制到同类页</Button>
             </>
           ) : <p className="muted">在文档页面上选择一个去密区域查看属性。</p>}
@@ -347,9 +389,11 @@ function ReviewPage() {
 }
 
 function QualityPage() {
-  const { documents } = useDisclosureStore();
+  const { documents, handovers, authorizations, currentOperatorId } = useDisclosureStore();
   const store = useDisclosureStore();
   const doc = documents[1];
+  const gate = isGated(handovers, doc.id);
+  const authorized = isAuthorized(authorizations, doc.id, currentOperatorId);
   const checks = [
     { id: 'forbidden-terms', label: '全文禁词与姓名复核', detail: '扫描原始页和发布页文本层' },
     { id: 'page-number', label: '页序与页码连续性', detail: '检查拆页、合并及漏页情况' },
@@ -359,6 +403,15 @@ function QualityPage() {
   return (
     <div className="page">
       <header className="page-heading"><div><small>QUALITY ASSURANCE / SIDE-BY-SIDE</small><h1>发布质控双人复核</h1><p>并排检查原始页与发布页，所有差异必须留下复核结论。</p></div><Button><FileCheck2 size={16} /> 导出发布清单</Button></header>
+      {!authorized && (
+        <div className="inline-banner denied"><Ban size={15} /><span>您不是 {doc.id} 的授权复核人，复核结论与发布操作均会被直接拒绝。</span></div>
+      )}
+      {gate && (
+        <div className="inline-banner gate"><ShieldAlert size={15} /><span>发布门禁未放行：{doc.id} 存在未完成的授权交接 {gate.id}，交接完成前相应批次不得发布。</span></div>
+      )}
+      {doc.reviewInvalid && (
+        <div className="inline-banner invalid"><FileWarning size={15} /><span>复核已失效：{doc.invalidReason ?? '密级或区域变更'}，以下结论须重新生成后才能发布。</span></div>
+      )}
       <div className="comparison-banner">
         <div><Eye size={17} /><strong>{doc.title}</strong><span>版本 3.4 · 双人复核</span></div>
         <Badge tone="amber">等待复审员 2/2</Badge>
@@ -369,25 +422,31 @@ function QualityPage() {
       </div>
       <div className="quality-bottom">
         <Card className="checks-card"><div className="card-title"><ClipboardCheck size={17} /><strong>发布前校验项</strong></div>{checks.map((check) => <button className="check-row" key={check.id} onClick={() => store.toggleReviewCheck(check.id)}><span className={store.reviewChecks[check.id] ? 'checked' : ''}>{store.reviewChecks[check.id] && <Check size={13} />}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></button>)}</Card>
-        <Card className="decision-card"><div className="card-title"><ShieldCheck size={17} /><strong>复核结论</strong></div><p>本批次共有 <b>{doc.redactions.length}</b> 个去密区域，其中已确认 {doc.redactions.filter((item) => item.status === 'confirmed').length} 个。</p><label><input type="checkbox" checked={store.metadataCleaned} onChange={store.toggleMetadata} /> 已确认元数据清理</label><div className="decision-actions"><Button variant="outline"><ArrowLeft size={15} /> 退回补件</Button><Button disabled={!store.metadataCleaned || Object.values(store.reviewChecks).some((value) => !value)} onClick={store.markReady}><Check size={15} /> 通过并标记可发布</Button></div></Card>
+        <Card className="decision-card"><div className="card-title"><ShieldCheck size={17} /><strong>复核结论</strong></div><p>本批次共有 <b>{doc.redactions.length}</b> 个去密区域，其中已确认 {doc.redactions.filter((item) => item.status === 'confirmed').length} 个。</p><label><input type="checkbox" checked={store.metadataCleaned} onChange={store.toggleMetadata} /> 已确认元数据清理</label><div className="decision-actions"><Button variant="outline"><ArrowLeft size={15} /> 退回补件</Button><Button disabled={!store.metadataCleaned || Object.values(store.reviewChecks).some((value) => !value) || !!gate || !authorized || doc.reviewInvalid} onClick={store.markReady}><Check size={15} /> 通过并标记可发布</Button></div></Card>
       </div>
     </div>
   );
 }
 
 function BatchesPage() {
-  const { documents } = useDisclosureStore();
+  const { documents, handovers } = useDisclosureStore();
+  const store = useDisclosureStore();
   const [selected, setSelected] = useState<string[]>(['DOC-00418']);
   const activeDoc = documents.find((doc) => doc.id === selected[0]) ?? documents[0];
   return (
     <div className="page">
-      <header className="page-heading"><div><small>RELEASE BATCH / TAXONOMY</small><h1>发布批次与标签</h1><p>按案件问题、辖区和披露对象组织文档，生成可追溯发布清单。</p></div><Button>生成发布包</Button></header>
+      <header className="page-heading"><div><small>RELEASE BATCH / TAXONOMY</small><h1>发布批次与标签</h1><p>按案件问题、辖区和披露对象组织文档，生成可追溯发布清单。</p></div><Button onClick={() => store.generateReleasePackage(selected)}>生成发布包</Button></header>
       <div className="batch-layout">
         <Card className="batch-list"><div className="card-title"><Layers3 size={17} /><strong>发布批次</strong></div>{['第一批披露 · 审阅中', '第二批披露 · 编制中', '专家材料 · 待补充'].map((name, index) => <button key={name} className={index === 0 ? 'active' : ''}><span>BATCH-{String(index + 1).padStart(2, '0')}</span><strong>{name}</strong><small>{[48, 79, 19][index]} 份文档</small></button>)}</Card>
         <Card className="batch-content">
           <div className="card-title"><Tags size={17} /><strong>文档与案件问题映射</strong><span>{selected.length} 已选择</span></div>
           <div className="batch-table">
-            {documents.map((doc) => <label key={doc.id} className="batch-row"><input type="checkbox" checked={selected.includes(doc.id)} onChange={() => setSelected((ids) => ids.includes(doc.id) ? ids.filter((id) => id !== doc.id) : [...ids, doc.id])} /><FileText size={17} /><div><strong>{doc.title}</strong><span>{doc.id} · {doc.issue}</span></div><Badge tone={doc.status === '可发布' ? 'green' : 'amber'}>{doc.status}</Badge></label>)}
+            {documents.map((doc) => {
+              const gate = isGated(handovers, doc.id);
+              return (
+                <label key={doc.id} className="batch-row"><input type="checkbox" checked={selected.includes(doc.id)} onChange={() => setSelected((ids) => ids.includes(doc.id) ? ids.filter((id) => id !== doc.id) : [...ids, doc.id])} /><FileText size={17} /><div><strong>{doc.title}</strong><span>{doc.id} · {doc.issue}</span></div>{gate && <Badge tone="amber">交接未完成 {gate.id}</Badge>}<Badge tone={doc.status === '可发布' ? 'green' : 'amber'}>{doc.status}</Badge></label>
+              );
+            })}
           </div>
           <div className="tag-editor"><h3>标签与分发级</h3><div className="tag-options">{(['合同问题', '设备缺陷', '现场安全', '损害赔偿', '仅律师可见']).map((tag, index) => <span key={tag} className={index < 3 ? 'selected' : ''}>{tag}</span>)}</div><label>导出清单说明<textarea defaultValue="按案卷编号升序导出，保留去密版本、操作者与审批时间。" /></label><Button>保存批次设置</Button></div>
         </Card>
@@ -397,12 +456,195 @@ function BatchesPage() {
   );
 }
 
+function HandoverPage() {
+  const { handovers, documents, reviewers, authorizations, currentOperatorId } = useDisclosureStore();
+  const store = useDisclosureStore();
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [from, setFrom] = useState(currentOperatorId);
+  const [to, setTo] = useState('zhou-xu');
+  const [docIds, setDocIds] = useState<string[]>([]);
+  const [regionByDoc, setRegionByDoc] = useState<Record<string, string[]>>({});
+  const [simulateFailure, setSimulateFailure] = useState(false);
+
+  const resetForm = () => {
+    setDocIds([]);
+    setRegionByDoc({});
+    setSimulateFailure(false);
+    setDialogOpen(false);
+  };
+  const submit = () => {
+    if (from === to || docIds.length === 0) return;
+    const regionIds = docIds.flatMap((docId) => {
+      const doc = documents.find((item) => item.id === docId);
+      const all = doc?.redactions.map((region) => region.id) ?? [];
+      return regionByDoc[docId] ?? all;
+    });
+    const id = store.createHandover({ fromReviewerId: from, toReviewerId: to, documentIds: docIds, regionIds, simulateFailure });
+    resetForm();
+    store.saveHandover(id);
+  };
+  const toggleDoc = (docId: string) => {
+    setDocIds((prev) => (prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]));
+  };
+  const toggleRegion = (docId: string, regionId: string) => {
+    setRegionByDoc((prev) => {
+      const doc = documents.find((item) => item.id === docId)!;
+      const all = doc.redactions.map((region) => region.id);
+      const current = prev[docId] ?? all;
+      const next = current.includes(regionId) ? current.filter((id) => id !== regionId) : [...current, regionId];
+      return { ...prev, [docId]: next };
+    });
+  };
+
+  const statusBadge = (status: Handover['status']) =>
+    status === 'completed' ? <Badge tone="green">已完成</Badge>
+      : status === 'failed' ? <Badge tone="red">保存失败</Badge>
+      : <Badge tone="amber">待完成</Badge>;
+
+  return (
+    <div className="page">
+      <header className="page-heading">
+        <div><small>AUTHORIZATION HANDOVER</small><h1>授权交接</h1><p>复核员离岗时按交接号转移文档与授权：已签结论只读保留，未完成项按文档与区域重新分派；保存失败从原授权恢复，同号重试。</p></div>
+        <Button onClick={() => setDialogOpen(true)}><Handshake size={16} /> 新建交接</Button>
+      </header>
+
+      <div className="handover-grid">
+        <div className="handover-list">
+          {handovers.map((h) => {
+            const scopeDocs = documents.filter((doc) => h.documentIds.includes(doc.id));
+            const signedTotal = scopeDocs.reduce((sum, doc) => sum + doc.redactions.filter((region) => h.regionIds.includes(region.id) && region.status === 'confirmed').length, 0);
+            const draftTotal = scopeDocs.reduce((sum, doc) => sum + doc.redactions.filter((region) => h.regionIds.includes(region.id) && region.status === 'draft').length, 0);
+            return (
+              <Card key={h.id} className="handover-card">
+                <div className="handover-head">
+                  <div className="handover-id"><strong>{h.id}</strong>{statusBadge(h.status)}</div>
+                  <span>{h.createdAt}</span>
+                </div>
+                <div className="handover-parties">
+                  <div><span>转出人</span><strong>{reviewerName(reviewers, h.fromReviewerId)}</strong></div>
+                  <ArrowRight size={16} className="handover-arrow" />
+                  <div><span>接手人</span><strong>{reviewerName(reviewers, h.toReviewerId)}</strong></div>
+                </div>
+                <div className="handover-scope">
+                  {scopeDocs.map((doc) => (
+                    <div className="scope-doc" key={doc.id}>
+                      <FileText size={15} />
+                      <div>
+                        <strong>{doc.id} · {doc.title}</strong>
+                        <span>{h.regionIds.filter((regionId) => doc.redactions.some((region) => region.id === regionId)).length} 个区域 · 已签结论 {signedTotal} 项（只读保留）· 未完成 {draftTotal} 项（重新分派给 {reviewerName(reviewers, h.toReviewerId)}）</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {h.status === 'failed' && <p className="handover-fail"><AlertTriangle size={14} /> {h.failReason}</p>}
+                <div className="handover-actions">
+                  {h.status !== 'completed'
+                    ? <Button variant="outline" onClick={() => store.saveHandover(h.id)}><RotateCcw size={15} /> {h.status === 'failed' ? '重试交接（同一交接号）' : '保存交接'}</Button>
+                    : <span className="handover-done"><Check size={14} /> 已于 {h.completedAt} 完成，负责人与授权均已变更</span>}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+
+        <aside className="side-stack">
+          <Card className="auth-matrix">
+            <div className="card-title"><ShieldCheck size={17} /><strong>当前授权范围</strong></div>
+            {reviewers.map((reviewer) => (
+              <div className="auth-row" key={reviewer.id}>
+                <div><strong>{reviewer.name}</strong><span>{reviewer.team}</span></div>
+                <div className="auth-badges">
+                  {(authorizations[reviewer.id] ?? []).length === 0 && <Badge tone="neutral">无授权文档</Badge>}
+                  {(authorizations[reviewer.id] ?? []).map((docId) => {
+                    const doc = documents.find((item) => item.id === docId);
+                    const mismatch = doc?.owner !== reviewer.id;
+                    return <Badge key={docId} tone={mismatch ? 'red' : 'green'}>{docId}{mismatch ? ' · 负责人不一致' : ''}</Badge>;
+                  })}
+                </div>
+              </div>
+            ))}
+          </Card>
+          <Card className="audit-card">
+            <div className="card-title"><ClipboardCheck size={17} /><strong>交接规则</strong></div>
+            <p><b>已签结论只读</b>confirmed 区域保留原签结论人，不得变更或重新分派。</p>
+            <p><b>未完成项重分派</b>草稿区域随文档与区域范围划归接手人。</p>
+            <p><b>失败可恢复</b>保存失败从原授权回滚，沿用同一交接号重试，负责人与权限同步变更。</p>
+            <p><b>发布门禁</b>交接完成前相应批次不得发布；之后密级或区域变更，受影响复核失效重算。</p>
+          </Card>
+        </aside>
+      </div>
+
+      <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content handover-dialog">
+            <Dialog.Title>新建授权交接</Dialog.Title>
+            <Dialog.Description>交接号保存时自动生成；范围按文档与区域勾选，未完成项将重新分派。</Dialog.Description>
+            <div className="handover-form">
+              <div className="handover-parties">
+                <label>转出人
+                  <select value={from} onChange={(event) => setFrom(event.target.value)}>
+                    {reviewers.map((reviewer) => <option key={reviewer.id} value={reviewer.id}>{reviewer.name} · {reviewer.team}</option>)}
+                  </select>
+                </label>
+                <ArrowRight size={16} className="handover-arrow" />
+                <label>接手人
+                  <select value={to} onChange={(event) => setTo(event.target.value)}>
+                    {reviewers.map((reviewer) => <option key={reviewer.id} value={reviewer.id}>{reviewer.name} · {reviewer.team}</option>)}
+                  </select>
+                </label>
+              </div>
+              <div className="scope-picker">
+                <span className="side-label">交接范围（按文档与区域）</span>
+                {documents.map((doc) => {
+                  const checked = docIds.includes(doc.id);
+                  const all = doc.redactions.map((region) => region.id);
+                  const selected = regionByDoc[doc.id] ?? all;
+                  return (
+                    <div key={doc.id} className="scope-picker-doc">
+                      <label className="scope-doc-head">
+                        <input type="checkbox" checked={checked} onChange={() => toggleDoc(doc.id)} />
+                        <FileText size={15} />
+                        <strong>{doc.id} · {doc.title}</strong>
+                        <Badge tone={doc.status === '可发布' ? 'green' : 'amber'}>{doc.status}</Badge>
+                      </label>
+                      {checked && (
+                        <div className="scope-regions">
+                          {doc.redactions.map((region) => (
+                            <label key={region.id} className="scope-region">
+                              <input type="checkbox" checked={selected.includes(region.id)} onChange={() => toggleRegion(doc.id, region.id)} />
+                              <span className={region.status === 'confirmed' ? 'signed' : ''}>{region.id} · {region.reason} · {region.status === 'confirmed' ? `已签（${reviewerName(reviewers, region.signedBy)}，只读保留）` : '未完成（重新分派）'}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <label className="simulate-failure">
+                <input type="checkbox" checked={simulateFailure} onChange={(event) => setSimulateFailure(event.target.checked)} />
+                <span>模拟本次保存失败（演练从原授权恢复与同号重试）</span>
+              </label>
+            </div>
+            <div className="dialog-actions">
+              <Dialog.Close asChild><Button variant="outline">取消</Button></Dialog.Close>
+              <Button onClick={submit} disabled={from === to || docIds.length === 0}><Handshake size={15} /> 生成交接号并保存</Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </div>
+  );
+}
+
 const rootRoute = createRootRoute({ component: AppShell });
 const documentsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: DocumentsPage });
 const reviewRoute = createRoute({ getParentRoute: () => rootRoute, path: '/review/$documentId', component: ReviewPage });
 const qualityRoute = createRoute({ getParentRoute: () => rootRoute, path: '/quality', component: QualityPage });
 const batchesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/batches', component: BatchesPage });
-const routeTree = rootRoute.addChildren([documentsRoute, reviewRoute, qualityRoute, batchesRoute]);
+const handoverRoute = createRoute({ getParentRoute: () => rootRoute, path: '/handover', component: HandoverPage });
+const routeTree = rootRoute.addChildren([documentsRoute, reviewRoute, qualityRoute, batchesRoute, handoverRoute]);
 const router = createRouter({ routeTree });
 
 declare module '@tanstack/react-router' {
